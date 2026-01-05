@@ -1,0 +1,16 @@
+# outputs / checkpoints
+outputs/
+**/checkpoint-*/
+**/*.pt
+**/*.bin
+**/*.safetensors
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.env
+.DS_Store
+
+# notebooks
+.ipynb_checkpoints/

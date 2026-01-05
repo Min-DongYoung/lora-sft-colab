@@ -1,0 +1,73 @@
+# configs/base.yaml
+project:
+  name: lora-sft-colab
+  output_dir: outputs
+  run_name: qwen2p5_1p5b_ultrachat_sft_seq1024_fp16_r8
+  seed: 42
+
+model:
+  name_or_path: Qwen/Qwen2.5-1.5B-Instruct   # causal LM, 1.54B params (model card)
+  trust_remote_code: false                  # 로드 실패 시에만 true로 변경 고려
+  use_cache: false                          # train 시 메모리 절약용(Trainer에서 강제로 끌 수도 있음)
+
+data:
+  dataset_name: HuggingFaceH4/ultrachat_200k
+  train_split: train_sft
+  eval_split: test_sft
+  # ultrachat_200k는 messages 기반 대화 포맷 (dataset card 확인)
+  format: ultrachat_messages
+  # week-1: 빠른 완주를 위해 일부만 사용 (안정화 후 늘리기)
+  max_train_samples: 10000
+  max_eval_samples: 1000
+
+tokenizer:
+  max_seq_length: 1024
+  padding_side: right
+  truncation: true
+
+sft:
+  # TRL SFTTrainer/SFTConfig에서 assistant_only_loss 지원
+  assistant_only_loss: true
+  packing: false
+
+lora:
+  task_type: CAUSAL_LM
+  r: 8                 # ablation: 4/8/16
+  alpha: 16            # 권장: alpha = 2*r (r만 바뀌는 ablation 유지)
+  dropout: 0.05
+  bias: none
+  target_modules:      # Qwen 계열에서 흔히 q_proj/v_proj 사용 (모델 구조에 따라 검증 필요)
+    - q_proj
+    - v_proj
+
+train:
+  precision: fp16      # week-1은 fp16 고정 권장 (bf16은 옵션으로만)
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16
+  gradient_checkpointing: true
+
+  # week-1: max_steps 기반으로 짧게 여러 번
+  max_steps: 500
+  learning_rate: 2.0e-4
+  weight_decay: 0.0
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 100
+  save_total_limit: 2
+
+  report_to: none
+
+metrics:
+  log_jsonl: true
+  log_step_time: true
+  log_tokens_per_sec: true
+  log_max_vram: true
+
+ablation:
+  # 스크립트가 지원하면 이 리스트로 sweep 가능.
+  r_values: [4, 8, 16]

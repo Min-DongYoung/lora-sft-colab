@@ -12,6 +12,21 @@ from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, set_seed
 from trl import SFTConfig, SFTTrainer
 
+QWEN_CHAT_TEMPLATE_WITH_GENERATION = (
+    "{% for message in messages %}\n"
+    "{% if message['role'] == 'system' %}\n"
+    "{{ '<|im_start|>system\\n' + message['content'] + '<|im_end|>\\n' }}\n"
+    "{% elif message['role'] == 'user' %}\n"
+    "{{ '<|im_start|>user\\n' + message['content'] + '<|im_end|>\\n' }}\n"
+    "{% elif message['role'] == 'assistant' %}\n"
+    "{{ '<|im_start|>assistant\\n' }}{% generation %}{{ message['content'] }}{% endgeneration %}{{ '<|im_end|>\\n' }}\n"
+    "{% endif %}\n"
+    "{% endfor %}\n"
+    "{% if add_generation_prompt %}\n"
+    "{{ '<|im_start|>assistant\\n' }}\n"
+    "{% endif %}\n"
+)
+
 
 def load_config(path):
     with open(path, "r", encoding="utf-8") as handle:
@@ -20,6 +35,29 @@ def load_config(path):
 
 def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
+
+
+def find_latest_checkpoint(run_dir):
+    if not os.path.isdir(run_dir):
+        return None
+    candidates = []
+    for name in os.listdir(run_dir):
+        if not name.startswith("checkpoint-"):
+            continue
+        parts = name.split("-")
+        if len(parts) != 2:
+            continue
+        try:
+            step = int(parts[1])
+        except ValueError:
+            continue
+        path = os.path.join(run_dir, name)
+        if os.path.isdir(path):
+            candidates.append((step, path))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[-1][1]
 
 
 def get_split(dataset_dict, split_name, fallback, label):
@@ -219,6 +257,22 @@ def get_effective_seq_len(sft_args, tokenizer_cfg):
     )
 
 
+def ensure_assistant_template(tokenizer, model_name, assistant_only_loss):
+    if not assistant_only_loss:
+        return False
+    template = getattr(tokenizer, "chat_template", None)
+    if template and "{% generation %}" in template:
+        return True
+    if "Qwen" in model_name:
+        tokenizer.chat_template = QWEN_CHAT_TEMPLATE_WITH_GENERATION
+        print("Tokenizer chat_template patched for assistant_only_loss.")
+        return True
+    print(
+        "assistant_only_loss disabled: tokenizer chat_template lacks generation tag."
+    )
+    return False
+
+
 def log_assistant_mask_check(trainer):
     dataloader = trainer.get_train_dataloader()
     try:
@@ -293,7 +347,9 @@ def main():
     if max_eval:
         eval_split = eval_split.select(range(min(max_eval, len(eval_split))))
 
-    assistant_only_loss = sft_cfg.get("assistant_only_loss", False)
+    assistant_only_loss = ensure_assistant_template(
+        tokenizer, model_cfg["name_or_path"], sft_cfg.get("assistant_only_loss", False)
+    )
     if assistant_only_loss:
         train_dataset = keep_messages_only(train_split)
         eval_dataset = keep_messages_only(eval_split)
@@ -320,6 +376,15 @@ def main():
         run_name = build_run_name(project_cfg["run_name"], r_value, lora_cfg["r"])
         run_dir = os.path.join(output_root, run_name)
         ensure_dir(run_dir)
+        resume_cfg = train_cfg.get("resume_from_checkpoint")
+        resume_path = None
+        if resume_cfg:
+            if isinstance(resume_cfg, str) and resume_cfg.lower() == "auto":
+                resume_path = find_latest_checkpoint(run_dir)
+            else:
+                resume_path = resume_cfg
+        if resume_path:
+            print(f"Resuming from checkpoint: {resume_path}")
 
         model = AutoModelForCausalLM.from_pretrained(
             model_cfg["name_or_path"],
@@ -421,7 +486,10 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
-        train_result = trainer.train()
+        if resume_path:
+            train_result = trainer.train(resume_from_checkpoint=resume_path)
+        else:
+            train_result = trainer.train()
         trainer.save_metrics("train", train_result.metrics)
         trainer.save_state()
 

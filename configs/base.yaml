@@ -61,6 +61,7 @@ train:
   save_total_limit: 2
 
   report_to: none
+  resume_from_checkpoint: auto
 
 metrics:
   log_jsonl: true

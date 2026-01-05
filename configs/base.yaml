@@ -33,7 +33,7 @@ sft:
 lora:
   task_type: CAUSAL_LM
   r: 8                 # ablation: 4/8/16
-  alpha: 16            # 권장: alpha = 2*r (r만 바뀌는 ablation 유지)
+  alpha: null          # null => alpha = 2 * r
   dropout: 0.05
   bias: none
   target_modules:      # Qwen 계열에서 흔히 q_proj/v_proj 사용 (모델 구조에 따라 검증 필요)
@@ -67,6 +67,7 @@ metrics:
   log_step_time: true
   log_tokens_per_sec: true
   log_max_vram: true
+  log_latency_percentiles: true
 
 ablation:
   # 스크립트가 지원하면 이 리스트로 sweep 가능.

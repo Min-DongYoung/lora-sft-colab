@@ -27,7 +27,7 @@ tokenizer:
 
 sft:
   # TRL SFTTrainer/SFTConfig에서 assistant_only_loss 지원
-  assistant_only_loss: true
+  assistant_only_loss: false
   packing: false
 
 lora:

@@ -37,6 +37,13 @@ def ensure_messages_column(split, label):
         )
 
 
+def keep_messages_only(split):
+    remove_columns = [col for col in split.column_names if col != "messages"]
+    if remove_columns:
+        return split.remove_columns(remove_columns)
+    return split
+
+
 def count_trainable_parameters(model):
     trainable = 0
     total = 0
@@ -176,11 +183,40 @@ def filter_sft_kwargs(kwargs):
             filtered[key] = value
         elif key == "evaluation_strategy" and "eval_strategy" in params:
             filtered["eval_strategy"] = value
+        elif key == "max_seq_length" and "max_length" in params:
+            filtered["max_length"] = value
         else:
             dropped.append(key)
     if dropped:
         print(f"SFTConfig: dropped unsupported args: {dropped}")
     return filtered
+
+
+def filter_trainer_kwargs(kwargs):
+    sig = inspect.signature(SFTTrainer.__init__)
+    params = set(sig.parameters.keys()) - {"self"}
+    filtered = {}
+    dropped = []
+    for key, value in kwargs.items():
+        if key in params:
+            filtered[key] = value
+        elif key == "tokenizer" and "processing_class" in params:
+            filtered["processing_class"] = value
+        elif key == "processing_class" and "tokenizer" in params:
+            filtered["tokenizer"] = value
+        else:
+            dropped.append(key)
+    if dropped:
+        print(f"SFTTrainer: dropped unsupported args: {dropped}")
+    return filtered
+
+
+def get_effective_seq_len(sft_args, tokenizer_cfg):
+    return (
+        getattr(sft_args, "max_seq_length", None)
+        or getattr(sft_args, "max_length", None)
+        or tokenizer_cfg.get("max_seq_length", 1024)
+    )
 
 
 def log_assistant_mask_check(trainer):
@@ -257,16 +293,21 @@ def main():
     if max_eval:
         eval_split = eval_split.select(range(min(max_eval, len(eval_split))))
 
-    train_dataset = train_split.map(
-        lambda batch: format_ultrachat_batch(batch, tokenizer),
-        batched=True,
-        remove_columns=train_split.column_names,
-    )
-    eval_dataset = eval_split.map(
-        lambda batch: format_ultrachat_batch(batch, tokenizer),
-        batched=True,
-        remove_columns=eval_split.column_names,
-    )
+    assistant_only_loss = sft_cfg.get("assistant_only_loss", False)
+    if assistant_only_loss:
+        train_dataset = keep_messages_only(train_split)
+        eval_dataset = keep_messages_only(eval_split)
+    else:
+        train_dataset = train_split.map(
+            lambda batch: format_ultrachat_batch(batch, tokenizer),
+            batched=True,
+            remove_columns=train_split.column_names,
+        )
+        eval_dataset = eval_split.map(
+            lambda batch: format_ultrachat_batch(batch, tokenizer),
+            batched=True,
+            remove_columns=eval_split.column_names,
+        )
 
     r_values = ablation_cfg.get("r_values") or [lora_cfg["r"]]
     output_root = project_cfg.get("output_dir", "outputs")
@@ -334,32 +375,37 @@ def main():
             "gradient_checkpointing": train_cfg.get("gradient_checkpointing", False),
             "max_seq_length": tokenizer_cfg.get("max_seq_length", 1024),
             "packing": sft_cfg.get("packing", False),
-            "assistant_only_loss": sft_cfg.get("assistant_only_loss", False),
-            "dataset_text_field": "text",
+            "assistant_only_loss": assistant_only_loss,
             "seed": project_cfg.get("seed", 42),
             "save_safetensors": True,
         }
+        if not assistant_only_loss:
+            sft_kwargs["dataset_text_field"] = "text"
         sft_args = SFTConfig(**filter_sft_kwargs(sft_kwargs))
 
-        trainer = SFTTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            args=sft_args,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            peft_config=peft_config,
-        )
+        trainer_kwargs = {
+            "model": model,
+            "processing_class": tokenizer,
+            "tokenizer": tokenizer,
+            "args": sft_args,
+            "train_dataset": train_dataset,
+            "eval_dataset": eval_dataset,
+            "peft_config": peft_config,
+        }
+        trainer = SFTTrainer(**filter_trainer_kwargs(trainer_kwargs))
 
         trainable, total, pct = count_trainable_parameters(trainer.model)
         print(
             f"Trainable params: {trainable} | Total params: {total} | Trainable%: {pct:.2f}"
         )
 
+        seq_len = get_effective_seq_len(sft_args, tokenizer_cfg)
+        world_size = getattr(sft_args, "world_size", 1)
         tokens_per_step_estimate = (
             sft_args.per_device_train_batch_size
             * sft_args.gradient_accumulation_steps
-            * sft_args.world_size
-            * sft_args.max_seq_length
+            * world_size
+            * seq_len
         )
         metrics_callback = None
         if metrics_cfg.get("log_jsonl", True):
@@ -369,7 +415,7 @@ def main():
             )
             trainer.add_callback(metrics_callback)
 
-        if sft_cfg.get("assistant_only_loss", False) and trainer.is_world_process_zero():
+        if assistant_only_loss and trainer.is_world_process_zero():
             log_assistant_mask_check(trainer)
 
         if torch.cuda.is_available():
@@ -402,6 +448,7 @@ def main():
             "adapter_only": True,
             "tokens_per_step_estimate": tokens_per_step_estimate,
             "tokens_per_sec_is_estimate": True,
+            "seq_length_estimate": seq_len,
             "seed": project_cfg.get("seed", 42),
             "config": cfg,
         }

@@ -1,7 +1,7 @@
 # configs/base.yaml
 project:
   name: lora-sft-colab
-  output_dir: outputs
+  output_dir: /content/drive/MyDrive/outputs
   run_name: qwen2p5_1p5b_ultrachat_sft_seq1024_fp16_r8
   seed: 42
 

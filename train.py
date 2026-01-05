@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import json
 import math
 import os
@@ -165,6 +166,23 @@ class JsonlMetricsCallback(TrainerCallback):
             self._file = None
 
 
+def filter_sft_kwargs(kwargs):
+    sig = inspect.signature(SFTConfig.__init__)
+    params = set(sig.parameters.keys()) - {"self"}
+    filtered = {}
+    dropped = []
+    for key, value in kwargs.items():
+        if key in params:
+            filtered[key] = value
+        elif key == "evaluation_strategy" and "eval_strategy" in params:
+            filtered["eval_strategy"] = value
+        else:
+            dropped.append(key)
+    if dropped:
+        print(f"SFTConfig: dropped unsupported args: {dropped}")
+    return filtered
+
+
 def log_assistant_mask_check(trainer):
     dataloader = trainer.get_train_dataloader()
     try:
@@ -293,34 +311,35 @@ def main():
             target_modules=target_modules,
         )
 
-        sft_args = SFTConfig(
-            output_dir=run_dir,
-            per_device_train_batch_size=train_cfg.get("per_device_train_batch_size", 1),
-            per_device_eval_batch_size=train_cfg.get("per_device_eval_batch_size", 1),
-            gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 1),
-            max_steps=train_cfg.get("max_steps", -1),
-            learning_rate=train_cfg.get("learning_rate", 2e-4),
-            weight_decay=train_cfg.get("weight_decay", 0.0),
-            warmup_ratio=train_cfg.get("warmup_ratio", 0.0),
-            lr_scheduler_type=train_cfg.get("lr_scheduler_type", "cosine"),
-            max_grad_norm=train_cfg.get("max_grad_norm", 1.0),
-            logging_steps=train_cfg.get("logging_steps", 10),
-            evaluation_strategy="steps",
-            eval_steps=train_cfg.get("eval_steps", 100),
-            save_strategy="steps",
-            save_steps=train_cfg.get("save_steps", 100),
-            save_total_limit=train_cfg.get("save_total_limit", 2),
-            report_to=train_cfg.get("report_to", "none"),
-            fp16=fp16,
-            bf16=bf16,
-            gradient_checkpointing=train_cfg.get("gradient_checkpointing", False),
-            max_seq_length=tokenizer_cfg.get("max_seq_length", 1024),
-            packing=sft_cfg.get("packing", False),
-            assistant_only_loss=sft_cfg.get("assistant_only_loss", False),
-            dataset_text_field="text",
-            seed=project_cfg.get("seed", 42),
-            save_safetensors=True,
-        )
+        sft_kwargs = {
+            "output_dir": run_dir,
+            "per_device_train_batch_size": train_cfg.get("per_device_train_batch_size", 1),
+            "per_device_eval_batch_size": train_cfg.get("per_device_eval_batch_size", 1),
+            "gradient_accumulation_steps": train_cfg.get("gradient_accumulation_steps", 1),
+            "max_steps": train_cfg.get("max_steps", -1),
+            "learning_rate": train_cfg.get("learning_rate", 2e-4),
+            "weight_decay": train_cfg.get("weight_decay", 0.0),
+            "warmup_ratio": train_cfg.get("warmup_ratio", 0.0),
+            "lr_scheduler_type": train_cfg.get("lr_scheduler_type", "cosine"),
+            "max_grad_norm": train_cfg.get("max_grad_norm", 1.0),
+            "logging_steps": train_cfg.get("logging_steps", 10),
+            "evaluation_strategy": "steps",
+            "eval_steps": train_cfg.get("eval_steps", 100),
+            "save_strategy": "steps",
+            "save_steps": train_cfg.get("save_steps", 100),
+            "save_total_limit": train_cfg.get("save_total_limit", 2),
+            "report_to": train_cfg.get("report_to", "none"),
+            "fp16": fp16,
+            "bf16": bf16,
+            "gradient_checkpointing": train_cfg.get("gradient_checkpointing", False),
+            "max_seq_length": tokenizer_cfg.get("max_seq_length", 1024),
+            "packing": sft_cfg.get("packing", False),
+            "assistant_only_loss": sft_cfg.get("assistant_only_loss", False),
+            "dataset_text_field": "text",
+            "seed": project_cfg.get("seed", 42),
+            "save_safetensors": True,
+        }
+        sft_args = SFTConfig(**filter_sft_kwargs(sft_kwargs))
 
         trainer = SFTTrainer(
             model=model,

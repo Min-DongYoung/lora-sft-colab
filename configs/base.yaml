@@ -23,6 +23,7 @@ data:
 tokenizer:
   max_seq_length: 1024
   padding_side: right
+  truncation_side: left
   truncation: true
 
 sft:

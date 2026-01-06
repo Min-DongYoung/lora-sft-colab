@@ -82,6 +82,44 @@ def keep_messages_only(split):
     return split
 
 
+def assistant_tokens_count(messages, tokenizer, max_len):
+    try:
+        out = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            return_dict=True,
+            return_assistant_tokens_mask=True,
+            truncation=True,
+            max_length=max_len,
+        )
+        mask = out.get("assistant_tokens_mask")
+        if mask is not None:
+            return int(sum(mask))
+    except Exception:
+        pass
+    last = messages[-1] if messages else None
+    if not last or last.get("role") != "assistant":
+        return 0
+    content = (last.get("content") or "").strip()
+    if not content:
+        return 0
+    ids = tokenizer(
+        content, add_special_tokens=False, truncation=True, max_length=max_len
+    )["input_ids"]
+    return len(ids)
+
+
+def filter_empty_assistant(dataset, tokenizer, max_len, label):
+    before = len(dataset)
+    dataset = dataset.filter(
+        lambda ex: assistant_tokens_count(ex["messages"], tokenizer, max_len) > 0
+    )
+    after = len(dataset)
+    if after != before:
+        print(f"{label} dataset filtered: {before} -> {after} (empty assistant).")
+    return dataset
+
+
 def count_trainable_parameters(model):
     trainable = 0
     total = 0
@@ -327,6 +365,9 @@ def main():
         use_fast=True,
     )
     tokenizer.padding_side = tokenizer_cfg.get("padding_side", "right")
+    truncation_side = tokenizer_cfg.get("truncation_side")
+    if truncation_side:
+        tokenizer.truncation_side = truncation_side
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -350,9 +391,19 @@ def main():
     assistant_only_loss = ensure_assistant_template(
         tokenizer, model_cfg["name_or_path"], sft_cfg.get("assistant_only_loss", False)
     )
+    if assistant_only_loss and tokenizer.truncation_side != "left":
+        tokenizer.truncation_side = "left"
+        print("assistant_only_loss enabled: set tokenizer.truncation_side='left'.")
+    max_len = tokenizer_cfg.get("max_seq_length", 1024)
     if assistant_only_loss:
         train_dataset = keep_messages_only(train_split)
         eval_dataset = keep_messages_only(eval_split)
+        train_dataset = filter_empty_assistant(
+            train_dataset, tokenizer, max_len, label="Train"
+        )
+        eval_dataset = filter_empty_assistant(
+            eval_dataset, tokenizer, max_len, label="Eval"
+        )
     else:
         train_dataset = train_split.map(
             lambda batch: format_ultrachat_batch(batch, tokenizer),
@@ -438,7 +489,7 @@ def main():
             "fp16": fp16,
             "bf16": bf16,
             "gradient_checkpointing": train_cfg.get("gradient_checkpointing", False),
-            "max_seq_length": tokenizer_cfg.get("max_seq_length", 1024),
+            "max_seq_length": max_len,
             "packing": sft_cfg.get("packing", False),
             "assistant_only_loss": assistant_only_loss,
             "seed": project_cfg.get("seed", 42),
